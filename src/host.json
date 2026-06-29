@@ -1,0 +1,25 @@
+{
+  "version": "2.0",
+  "logging": {
+    "applicationInsights": {
+      "samplingSettings": {
+        "isEnabled": true,
+        "excludedTypes": "Request"
+      }
+    }
+  },
+  "extensions": {
+    "mcp": {
+      "instructions": "Use start_mining to mine a chain of proof-of-work blocks. If it returns status 'running', wait poll_after_seconds and call get_mining_result with the returned workflow_id. Pass a higher 'difficulty' to make mining take longer.",
+      "serverName": "LongRunningMcpServer",
+      "serverVersion": "1.0.0"
+    },
+    "durableTask": {
+      "hubName": "%TASKHUB_NAME%"
+    }
+  },
+  "extensionBundle": {
+    "id": "Microsoft.Azure.Functions.ExtensionBundle.Preview",
+    "version": "[4.*, 5.0.0)"
+  }
+}
