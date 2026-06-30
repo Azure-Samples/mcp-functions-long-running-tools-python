@@ -103,7 +103,7 @@ module api './app/api.bicep' = {
     applicationInsightsName: monitoring.outputs.name
     appServicePlanId: appServicePlan.outputs.resourceId
     runtimeName: 'python'
-    runtimeVersion: '3.11'
+    runtimeVersion: '3.13'
     storageAccountName: storage.outputs.name
     enableBlob: storageEndpointConfig.enableBlob
     enableQueue: storageEndpointConfig.enableQueue

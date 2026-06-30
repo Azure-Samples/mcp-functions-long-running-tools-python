@@ -8,9 +8,9 @@ work, backed by a Durable Functions orchestration (a proof-of-work miner):
   handle and an instruction to poll.
 * ``get_mining_result`` polls a previously started workflow by its ``workflow_id``.
 
-This is a WORKAROUND until the MCP Task extension (SEP-2663) is supported by the Functions MCP
-trigger. Once tasks are native, the server can return a task handle and the client polls
-``tasks/get`` via the SDK, making this two-tool pattern unnecessary.
+The MCP Tasks extension (SEP-2663) was introduced in the 2026-07-28 release candidate for
+building long-running tools. However, until it's broadly supported in the ecosystem, we need a
+solution today -- and Durable Functions is a good fit here.
 """
 
 import asyncio

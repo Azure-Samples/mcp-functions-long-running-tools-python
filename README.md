@@ -19,14 +19,11 @@ that shows how to run **long-running MCP tools** (tool calls that take longer th
 willing to wait) by backing them with [Durable Functions](https://learn.microsoft.com/azure/azure-functions/durable/durable-functions-overview)
 and a **budgeted start + poll** pattern. Durable Functions lets you write stateful, long-running workflows as ordinary code, orchestrating multiple function calls while the platform handles checkpointing, scaling, and recovery.
 
-> This is the Python port of the [.NET sample](https://github.com/Azure-Samples/mcp-functions-long-running-tools).
-> The pattern, tool contract, and infrastructure are identical; only the function app is written in Python.
-
-> **Status: workaround.** This pattern is a pragmatic bridge until the MCP **Task extension**
-> ([SEP-2663](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2663)) is supported
-> by the Azure Functions MCP trigger. Once tasks are native and supported in the Functions extension, the protocol handles async itself (the
-> server returns `resultType: "task"` and the client polls `tasks/get` via the SDK), and this
-> two-tool pattern becomes unnecessary.
+> The MCP **Tasks extension**
+> ([SEP-2663](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2663)) was introduced
+> in the [`2026-07-28` release candidate](https://blog.modelcontextprotocol.io/posts/2026-07-28-release-candidate/)
+> for building long-running tools. However, until it's broadly supported in the ecosystem, we need a
+> solution today — and **Durable Functions** is a good fit here.
 
 ## The problem
 
@@ -40,75 +37,55 @@ not block for the full duration of a long workflow.
 
 Two MCP tools are exposed:
 
-1. **`start_mining`** - starts a Durable orchestration (which mines a short chain of proof-of-work blocks), then **awaits completion up to a short budget** (~20s, configurable).
-   - If the workflow finishes **within budget**, the **result is returned inline**. The second tool is never needed. This is the common case and it removes any "did the agent remember to poll?" risk.
-   - If the budget expires, a **handle** (`workflow_id`) is returned plus an explicit instruction to poll. The orchestration keeps running in Durable storage regardless of the client connection.
+1. **`start_mining`** - starts a Durable orchestration (which mines a short chain of proof-of-work blocks), then awaits completion up to a short budget (~20s, configurable).
+   - If the workflow finishes within budget, the result is returned inline. The second tool is never needed. This is the common case and it removes any "did the agent remember to poll?" risk.
+   - If the budget expires, a handle (`workflow_id`) is returned plus an explicit instruction to poll. The orchestration keeps running in Durable storage regardless of the client connection.
 
-2. **`get_mining_result`** - takes the `workflow_id` (a **required** parameter) and returns the current state: `completed` (with result), `failed` (with error), `running` (poll again), or `not_found` (unknown/expired id).
+2. **`get_mining_result`** - takes the `workflow_id` (a _required_ parameter) and returns the current state: `completed` (with result), `failed` (with error), `running` (poll again), or `not_found` (unknown).
 
-Ordering is made robust by design: `workflow_id` is a **required** parameter of the poll tool (so the agent can't poll without first starting), the "running" response carries `poll_after_seconds` and a `next` instruction, and the budgeted wait means fast workflows never hit the second tool at all.
+Ordering is made robust by design: `workflow_id` is a _required_ parameter of the poll tool (so the agent can't poll without first starting), the "running" response carries `poll_after_seconds` and a `next` instruction to guide the agent, and the budgeted wait means fast workflows never hit the second tool at all.
 
-> **Known weakness.** Even so, the poll path still relies on the **LLM correctly remembering, and
-> not hallucinating, the `workflow_id`** it was handed. If the model garbles or invents an id, the
+> **Known weakness.** Even so, the poll path still relies on the LLM correctly remembering, and
+> not hallucinating, the `workflow_id` it was handed. If the model garbles or invents an id, the
 > poll lands on the wrong instance or none at all (which is why `get_mining_result` returns
-> `not_found` rather than guessing). The budgeted wait mitigates this by resolving most calls without
+> `not_found` rather than guessing). The budgeted wait mitigates this by resolving calls that don't need
 > a second hop, but it's the core reason the MCP Task extension, where the SDK (not the model)
 > carries the handle, is the better long-term answer.
 
-## The example workflow: a proof-of-work miner
+## The example workflow: a blockchain-style miner
 
-The long-running work in this sample is a small, dependency-free **proof-of-work miner**. The
-orchestration mines a short chain of blocks. Each block needs a SHA-256 hash with at least
-`difficulty` leading zero bits (found by trying nonces `0, 1, 2, …`), and each block includes the
-previous block's hash, so the blocks form a chain. That makes it a natural example of Durable's
-[**function-chaining pattern**](https://learn.microsoft.com/azure/durable-task/common/durable-task-sequence?tabs=python&pivots=durable-functions),
-where each step depends on the output of the one before it.
+The long-running work in this sample is a small **miner**, the same idea behind blockchain
+_proof-of-work_, but with nothing crypto to learn. Here's the mechanic in plain terms: to "mine" a
+block, the system runs an input through a one-way math function (SHA-256) and checks whether the
+result matches a required pattern, i.e. starting with at least `difficulty` zeros. There's no
+shortcut, so the miner just keeps trying different inputs (`0, 1, 2, …`) until one happens to produce
+a result that fits. Lots of trial and error, which naturally takes time — a good stand-in for any
+real long-running job.
 
-Each extra bit roughly doubles the expected number of hashes, so higher difficulty takes longer.
+The miner builds a short _chain_ of blocks, where each block's input includes the previous block's
+answer. Because every step depends on the one before it, this is a natural example of Durable's
+[**function-chaining pattern**](https://learn.microsoft.com/azure/durable-task/common/durable-task-sequence?tabs=python&pivots=durable-functions).
 
-The CPU-heavy mining runs in a Durable **activity** (`mine_block`), keeping the **orchestrator**
-(`run_orchestrator`) deterministic, as Durable requires. The two MCP tools live alongside them in
-[`src/function_app.py`](src/function_app.py) and use the Durable client (`@app.durable_client_input`)
-to start and poll the orchestration.
-
-## Durable backend: Azure Storage locally, DTS in Azure
-
-This sample uses two Durable Functions backends so local development stays lightweight while Azure
-gets a managed, scalable backend:
-
-- **Locally**, it uses the **Azure Storage** backend, served by the [Azurite](https://learn.microsoft.com/azure/storage/common/storage-use-azurite)
-  emulator. This is the default in [`src/host.json`](src/host.json), so all you need locally is Azurite.
-- **In Azure**, it uses the [**Durable Task Scheduler (DTS)**](https://learn.microsoft.com/azure/durable-task/scheduler/durable-task-scheduler),
-  a managed backend that `azd up` provisions and connects via managed identity.
-
-The DTS configuration lives in [`src/host.dts.json`](src/host.dts.json). You don't switch backends by
-hand: `azd` package [hooks](azure.yaml) swap `host.dts.json` in for the deployment package and restore
-the local `host.json` afterward, so your working tree always runs on Azure Storage. The orchestration
-and MCP tool code are identical for both backends.
+The `difficulty` knob controls the runtime: each extra required zero roughly doubles the expected
+number of attempts, so higher difficulty takes longer. That single knob is what lets the sample
+demonstrate both the quick _inline_ path and the slow _poll_ path.
 
 ## Prerequisites
 
-- [Python 3.11](https://www.python.org/downloads/) (or another version supported by the
-  [Azure Functions Python runtime](https://learn.microsoft.com/azure/azure-functions/functions-reference-python#python-version)).
+- [Python 3.13](https://www.python.org/downloads/)
 - [Azure Functions Core Tools v4](https://learn.microsoft.com/azure/azure-functions/functions-run-local)
 - [Azure Developer CLI (`azd`)](https://learn.microsoft.com/azure/developer/azure-developer-cli/install-azd)
   for deploying to Azure.
 - [Azurite](https://learn.microsoft.com/azure/storage/common/storage-use-azurite) storage emulator
-  (the local Durable Functions backend). Install with `npm install -g azurite`.
-- [VS Code](https://code.visualstudio.com/) with [GitHub Copilot](https://code.visualstudio.com/docs/copilot/overview)
-  (agent mode) to call the tools as an MCP client.
+- [VS Code](https://code.visualstudio.com/) with [GitHub Copilot](https://code.visualstudio.com/docs/copilot/overview) (agent mode) to call the tools as an MCP client.
 
 ## Run it locally
 
 **1. Start Azurite** (in its own terminal):
 
 ```bash
-azurite --silent --location ./.azurite
+azurite --skipApiVersionCheck --silent --location ./.azurite
 ```
-
-> If the host logs an Azurite "API version ... is not supported" error, your Azurite is older than
-> the storage API the Functions runtime requests. Upgrade Azurite (`npm install -g azurite@latest`),
-> or start it with `--skipApiVersionCheck`.
 
 **2. Create a virtual environment and install dependencies** (from the `src` folder):
 
@@ -158,7 +135,7 @@ without testing locally first).
 
 ### Try the inline path
 
-Ask the agent to mine at a **lower difficulty** so the work finishes within the wait budget:
+Ask the agent to mine at a lower difficulty so the work finishes within the wait budget:
 
 > Mine some blocks at difficulty 18.
 
@@ -180,7 +157,7 @@ azd up
 ```
 
 `azd` prompts for an environment name, subscription, and region, as well as the **mining difficulty**
-and **wait budget (seconds)** for the deployed app.
+(recommended value: 24) and **wait budget (seconds)** (recommended value: 20) for the deployed app.
 
 Durable Functions requires a storage backend to checkpoint execution progress. For local
 testing, the app uses Azure Storage. When deployed to Azure, it uses the [Durable Task Scheduler (DTS)](https://learn.microsoft.com/azure/durable-task/scheduler/durable-task-scheduler), which is the recommended backend.
@@ -200,8 +177,15 @@ az functionapp keys list -g <resource-group> -n <function-app> \
 
 Tear everything down with `azd down`.
 
-> **Note:** If you have Docker installed, you can also use the [DTS emulator](https://learn.microsoft.com/azure/durable-task/scheduler/develop-with-durable-task-scheduler?tabs=dedicated&pivots=az-cli#durable-task-scheduler-emulator) for local
-> testing if you prefer. All code remains identical regardless of backend; only configuration in `host.json` differs.
+### Enable built-in MCP authentication
+
+By default the deployed endpoint is _key-protected_ (the `x-functions-key` header above). For a more
+secure, standards-based setup, you can enable _built-in MCP authentication_ so clients connect using
+an OAuth flow backed by Microsoft Entra ID instead of a shared access key. This lets the agent
+authenticate as a user/identity rather than passing a static system key.
+
+Follow the steps in
+[Enable built-in MCP authentication in the Azure portal](https://learn.microsoft.com/azure/azure-functions/functions-mcp-tutorial?tabs=mcp-extension&pivots=programming-language-python#enable-built-in-mcp-authentication-in-azure-portal).
 
 ## Configuration
 
@@ -230,33 +214,40 @@ sibling fields so nothing is lost:
 `Failed` and `Terminated` Durable states both map to `status: "failed"` because they drive the
 **same** agent action; the precise cause is preserved in `reason` (`error` / `terminated`).
 
+## Durable backend: Azure Storage locally, DTS in Azure
+
+This sample uses two Durable Functions backends so local development stays lightweight while Azure
+gets a managed, scalable backend:
+
+- Locally, it uses the Azure Storage backend, served by the [Azurite](https://learn.microsoft.com/azure/storage/common/storage-use-azurite)
+  emulator. This is the default in [`src/host.json`](src/host.json), so all you need locally is Azurite.
+- In Azure, it uses the [Durable Task Scheduler (DTS)](https://learn.microsoft.com/azure/durable-task/scheduler/durable-task-scheduler),
+  a managed backend that `azd up` provisions and connects via managed identity.
+
+The DTS configuration lives in [`src/host.dts.json`](src/host.dts.json). You don't switch backends by
+hand: `azd` package [hooks](azure.yaml) swap `host.dts.json` in for the deployment package and restore
+the local `host.json` afterward, so your working tree always runs on Azure Storage. The orchestration
+and MCP tool code are identical for both backends.
+
 ## Q&A
 
-**Q: Will agents call `start` then `poll` in the right order?**
-Make `workflow_id` a **required** parameter of the poll tool (the schema enforces ordering), put
-`next`/`poll_after_seconds` instructions **in the result payload**, and make the poll tool
-**self-correcting** via its `status` field. The budgeted wait then removes the second tool entirely
-for fast workflows.
-
 **Q: Why is the wait budget ~20s, and what bounds it?**
-The **client** tool-call timeout, not the Functions host timeout. The host timeout on Flex/Premium is
+The client tool-call timeout, not the Functions host timeout. The host timeout on Flex/Premium plans is
 generous (minutes), but the client may give up in ~30s, and that's non-standard and varies per
-client. So default the budget **conservatively** (~20s, as an app setting) to stay under the most
-aggressive clients, and rely on the poll fallback for anything longer. `notifications/progress` could
-extend the window on clients that honor it, but it's optional and client-dependent, so it's left out
-here for clarity.
+client. So default the budget conservatively (~20s, as an app setting) to stay under the most
+aggressive clients, and rely on the poll fallback for anything longer. 
 
 **Q: While a long-running task is in flight, can the agent (or other agents) still call other tools?**
-It's the **agent's turn that's tied up, not the server**. Any synchronous `tools/call` blocks the
+It's the agent's turn that's tied up, not the server. Any synchronous `tools/call` blocks the
 agent until it returns; that's true for every tool, long or short. The long-running case just (a) can
-consume the whole per-call budget before returning, and (b) puts the agent into a **poll loop**
+consume the whole per-call budget before returning, and (b) puts the agent into a poll loop
 (wait `poll_after_seconds`, call `get_mining_result`, repeat), which in practice is a dedicated loop
-that monopolizes the agent's attention, so it *feels* blocking end to end. (The agent isn't strictly
-*forced* to poll back to back; `poll_after_seconds` is a hint, and a capable client could interleave
-other work between polls, but most agents serialize.) The **server is never blocked**: the budgeted
+that monopolizes the agent's attention, so it feels blocking end to end. (The agent isn't strictly
+_forced_ to poll back to back; `poll_after_seconds` is a hint, and a capable client could interleave
+other work between polls, but most agents serialize.) The server is never blocked: the budgeted
 wait is async (it doesn't hold a thread), the orchestration runs in the background keyed by
-`workflow_id`, and the Functions host serves requests concurrently and scales out. So a **different
-agent on its own session can call the server's tools at the same time**, and many long-running
+`workflow_id`, and the Functions host serves requests concurrently and scales out. So a _different_
+agent on its own session can call the server's tools at the same time, and many long-running
 workflows can run in parallel. This is the limitation the native MCP Task extension removes: the SDK
 polls out of band, freeing the model from the loop.
 
