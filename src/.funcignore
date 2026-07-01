@@ -1,0 +1,9 @@
+.git*
+.vscode
+.DS_Store
+__pycache__
+.venv
+.python_packages
+local.settings.json
+host.dts.json
+host.json.bak
