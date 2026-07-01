@@ -2,6 +2,5 @@
 # The Python Worker is managed by the Azure Functions platform
 # Manually managing azure-functions-worker may cause unexpected issues
 
-# The MCP tool trigger requires azure-functions >= 2.2.0b3
-azure-functions>=2.2.0b3
+azure-functions>=2.1.0
 azure-functions-durable>=1.5.0
